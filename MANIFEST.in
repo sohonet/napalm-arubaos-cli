@@ -1,0 +1,3 @@
+include requirements.txt
+include napalm_arubaos-cli/templates/*.j2
+include napalm_arubaos-cli/utils/textfsm_templates/*.tpl
