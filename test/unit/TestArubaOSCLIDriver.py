@@ -16,7 +16,7 @@
 
 import unittest
 
-from napalm_arubaos_cli import arubaos_cli
+from napalm_arubaoscli import arubaoscli
 from napalm.base.test.base import TestConfigNetworkDriver
 
 
@@ -29,10 +29,10 @@ class TestConfigArubaOSCLIDriver(unittest.TestCase, TestConfigNetworkDriver):
         hostname = '127.0.0.1'
         username = 'vagrant'
         password = 'vagrant'
-        cls.vendor = 'arubaos_cli'
+        cls.vendor = 'arubaoscli'
 
         optional_args = {'port': 12443, }
-        cls.device = arubaos_cli.ArubaOSCLIDriver(hostname, username, password, timeout=60,
+        cls.device = arubaoscli.ArubaOSCLIDriver(hostname, username, password, timeout=60,
                                              optional_args=optional_args)
         cls.device.open()
 

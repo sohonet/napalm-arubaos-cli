@@ -13,6 +13,6 @@
 # the License.
 
 """napalm-arubaos-cli package."""
-from napalm_arubaos_cli.arubaos_cli import ArubaOSCLIDriver  # noqa
+from napalm_arubaos_cli.arubaoscli import ArubaOSCLIDriver  # noqa
 
 __all__ = ('ArubaOSCLIDriver',)

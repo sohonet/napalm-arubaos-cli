@@ -6,7 +6,7 @@ from napalm.base.test import conftest as parent_conftest
 
 from napalm.base.test.double import BaseTestDouble
 
-from napalm_arubaos_cli import arubaos_cli
+from napalm_arubaoscli import arubaoscli
 
 
 @pytest.fixture(scope='class')
@@ -16,9 +16,9 @@ def set_device_parameters(request):
         request.cls.device.close()
     request.addfinalizer(fin)
 
-    request.cls.driver = arubaos_cli.ArubaOSCLIDriver
+    request.cls.driver = arubaoscli.ArubaOSCLIDriver
     request.cls.patched_driver = PatchedArubaOSCLIDriver
-    request.cls.vendor = 'arubaos_cli'
+    request.cls.vendor = 'arubaoscli'
     parent_conftest.set_device_parameters(request)
 
 
@@ -27,7 +27,7 @@ def pytest_generate_tests(metafunc):
     parent_conftest.pytest_generate_tests(metafunc, __file__)
 
 
-class PatchedArubaOSCLIDriver(arubaos_cli.ArubaOSCLIDriver):
+class PatchedArubaOSCLIDriver(arubaoscli.ArubaOSCLIDriver):
     """Patched ArubaOSCLI Driver."""
 
     def __init__(self, hostname, username, password, timeout=60, optional_args=None):
