@@ -57,6 +57,13 @@ class ArubaOSCLIDriver(NetworkDriver):
         self.timeout = timeout
         self.port = 22
 
+        # by default, 6300 series switches should be inside the MGMT VRF.  
+        # This is required for tftp copy command to ensure that the correct route is in place
+        if "6300" in hostname:
+            self.mgmt_vrf = "MGMT"
+        else:
+            self.mgmt_vrf = "default"
+
         if optional_args is None:
             optional_args = {}
         self.optional_args = optional_args
@@ -197,8 +204,9 @@ class ArubaOSCLIDriver(NetworkDriver):
             tftp_thread.daemon = True
             tftp_thread.start()
 
+
             result = self.send_command(
-                [f"copy tftp://{self._get_ipaddress()}/{destfile} running-config"]
+                [f"copy tftp://{self._get_ipaddress()}/{destfile} running-config vrf {self.mgmt_vrf}"]
             )
 
             # Server downloads in the background. Sleep to wait for it
