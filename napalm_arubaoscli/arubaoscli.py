@@ -28,6 +28,7 @@ import time
 import io
 import re
 import logging
+import os
 
 from napalm.base import NetworkDriver
 from napalm.base.exceptions import (
@@ -57,7 +58,7 @@ class ArubaOSCLIDriver(NetworkDriver):
         self.timeout = timeout
         self.port = 22
 
-        # by default, 6300 series switches should be inside the MGMT VRF.  
+        # by default, 6300 series switches should be inside the MGMT VRF.
         # This is required for tftp copy command to ensure that the correct route is in place
         if "6300" in hostname:
             self.mgmt_vrf = "MGMT"
@@ -227,6 +228,9 @@ class ArubaOSCLIDriver(NetworkDriver):
         return _handler
 
     def _get_ipaddress(self):
+        # Use TFTP_SERVER_IP env var if set, otherwise auto-detect
+        if os.environ.get("TFTP_SERVER_IP"):
+            return os.environ.get("TFTP_SERVER_IP")
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("1.1.1.1", 1))
         ip = s.getsockname()[0]
