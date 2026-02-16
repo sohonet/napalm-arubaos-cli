@@ -223,8 +223,11 @@ class ArubaOSCLIDriver(NetworkDriver):
 
         def _handler(fn, raddress=None, rport=None):
             if fn == "candidate":
-                return io.StringIO(candidate)
-
+                # Use BytesIO instead of StringIO (TFTP transfers bytes)
+                # And add a fake 'name' attribute to avoid the lockfile bug
+                file_obj = io.BytesIO(candidate.encode('utf-8') if isinstance(candidate, str) else candidate)
+                file_obj.name = fn  # Add the name attribute that tftpy expects
+                return file_obj
         return _handler
 
     def _get_ipaddress(self):
