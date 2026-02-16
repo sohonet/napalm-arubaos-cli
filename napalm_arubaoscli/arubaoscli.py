@@ -200,6 +200,7 @@ class ArubaOSCLIDriver(NetworkDriver):
             tftp_server = tftpy.TftpServer(
                 tftproot=temp_dir,
                 dyn_file_func=self._tftp_handler(filecontent),
+                flock=False #disable file locking
             )
             tftp_thread = Thread(target=tftp_server.listen)
             tftp_thread.daemon = True
