@@ -200,7 +200,6 @@ class ArubaOSCLIDriver(NetworkDriver):
             tftp_server = tftpy.TftpServer(
                 tftproot=temp_dir,
                 dyn_file_func=self._tftp_handler(filecontent),
-                flock=False #disable file locking
             )
             tftp_thread = Thread(target=tftp_server.listen)
             tftp_thread.daemon = True
@@ -221,14 +220,9 @@ class ArubaOSCLIDriver(NetworkDriver):
 
     def _tftp_handler(self, candidate):
         """tftp handler. return candidate no matter what is requested."""
-
         def _handler(fn, raddress=None, rport=None):
             if fn == "candidate":
-                # Use BytesIO instead of StringIO (TFTP transfers bytes)
-                # And add a fake 'name' attribute to avoid the lockfile bug
-                file_obj = io.BytesIO(candidate.encode('utf-8') if isinstance(candidate, str) else candidate)
-                file_obj.name = fn  # Add the name attribute that tftpy expects
-                return file_obj
+                return io.StringIO(candidate)
         return _handler
 
     def _get_ipaddress(self):
