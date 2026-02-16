@@ -11,7 +11,7 @@ with open("requirements.txt", "r") as fs:
 
 setup(
     name="napalm-arubaos-cli",
-    version="0.1.3",
+    version="0.1.4",
     packages=find_packages(),
     author="David Barroso",
     author_email="dbarrosop@dravetech.com",
