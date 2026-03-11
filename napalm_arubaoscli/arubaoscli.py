@@ -194,7 +194,12 @@ class ArubaOSCLIDriver(NetworkDriver):
             )
 
     def _transfer_file(self, filecontent, destfile="candidate"):
+        logger.info("Preparing to transfer candidate config to %s", self.hostname)
+        logger.info("Candidate config content:\n%s", filecontent)
         # Transfer merge candidate with tftp
+
+        self._wait_for_tftp_port()
+
         with tempfile.TemporaryDirectory() as temp_dir:
             # Setup TFTP server
             tftp_server = tftpy.TftpServer(
@@ -205,7 +210,7 @@ class ArubaOSCLIDriver(NetworkDriver):
             tftp_thread.daemon = True
             tftp_thread.start()
 
-
+            logger.info("Starting TFTP server to transfer candidate config to %s", self.hostname)
             result = self.send_command(
                 [f"copy tftp://{self._get_ipaddress()}/{destfile} running-config vrf {self.mgmt_vrf}"]
             )
@@ -213,10 +218,32 @@ class ArubaOSCLIDriver(NetworkDriver):
             # Server downloads in the background. Sleep to wait for it
             time.sleep(5)
 
-            tftp_server.stop()
-            tftp_thread.join()
+            tftp_server.stop(now=True)
+            tftp_thread.join(timeout=10)
+            if tftp_thread.is_alive():
+                # Log and move on — daemon thread will die with the process,
+                # but we've at least surfaced the problem
+                logger.error("TFTP server thread failed to terminate cleanly")
+                raise RuntimeError("TFTP server thread failed to terminate cleanly")
 
             return result
+
+    def _wait_for_tftp_port(self, port=69, retries=3, interval=5):
+        """Wait for TFTP port to become available before starting server."""
+        for attempt in range(retries):
+            logger.debug("Checking if TFTP port %d is available (attempt %d/%d)", port, attempt + 1, retries)
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                try:
+                    s.bind(("", port))
+                    return  # Port is free
+                except OSError:
+                    if attempt == retries - 1:
+                        logger.error("TFTP port %d still in use after %d seconds", port, retries * interval)
+                        raise RuntimeError(
+                            f"TFTP port {port} still in use after {retries * interval}s — "
+                            "a previous transfer may be stuck"
+                        )
+                    time.sleep(interval)
 
     def _tftp_handler(self, candidate):
         """tftp handler. return candidate no matter what is requested."""
@@ -228,9 +255,11 @@ class ArubaOSCLIDriver(NetworkDriver):
     def _get_ipaddress(self):
         # Use TFTP_SERVER_IP env var if set, otherwise auto-detect
         if os.environ.get("TFTP_SERVER_IP"):
+            logger.info("TFTP Server running on %s (from TFTP_SERVER_IP environment variable)", os.environ.get("TFTP_SERVER_IP"))
             return os.environ.get("TFTP_SERVER_IP")
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("1.1.1.1", 1))
         ip = s.getsockname()[0]
         s.close()
+        logger.info("TFTP Server running on %s (auto-detected)", ip)
         return ip
