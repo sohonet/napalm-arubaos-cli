@@ -205,16 +205,25 @@ class ArubaOSCLIDriver(NetworkDriver):
             tftp_thread.daemon = True
             tftp_thread.start()
 
+            try:
+                result = self.send_command(
+                    [f"copy tftp://{self._get_ipaddress()}/{destfile} running-config vrf {self.mgmt_vrf}"]
+                )
 
-            result = self.send_command(
-                [f"copy tftp://{self._get_ipaddress()}/{destfile} running-config vrf {self.mgmt_vrf}"]
-            )
-
-            # Server downloads in the background. Sleep to wait for it
-            time.sleep(5)
-
-            tftp_server.stop()
-            tftp_thread.join()
+                # Server downloads in the background. Sleep to wait for it
+                time.sleep(5)
+            finally:
+                tftp_server.stop(now=True)
+                # tftpy's select() loop has a 5s SOCK_TIMEOUT before it
+                # checks the shutdown flag, so allow up to 10s for cleanup.
+                tftp_thread.join(timeout=10)
+                # If the thread still hasn't released the socket, force
+                # close it so the next feature can bind to port 69.
+                if tftp_thread.is_alive():
+                    try:
+                        tftp_server.sock.close()
+                    except Exception:
+                        pass
 
             return result
 
