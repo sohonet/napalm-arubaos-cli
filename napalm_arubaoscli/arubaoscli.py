@@ -197,7 +197,7 @@ class ArubaOSCLIDriver(NetworkDriver):
         logger.info("Preparing to transfer candidate config to %s", self.hostname)
         logger.info("Candidate config content:\n%s", filecontent)
         # Transfer merge candidate with tftp
-        
+
         self._wait_for_tftp_port()
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -218,7 +218,7 @@ class ArubaOSCLIDriver(NetworkDriver):
             # Server downloads in the background. Sleep to wait for it
             time.sleep(5)
 
-            tftp_server.stop()
+            tftp_server.stop(now=True)
             tftp_thread.join(timeout=10)
             if tftp_thread.is_alive():
                 # Log and move on — daemon thread will die with the process,
