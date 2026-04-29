@@ -96,6 +96,10 @@ class ArubaOSCLIDriver(NetworkDriver):
             raise ConnectionException(
                 "Cannot connect to switch via SSH: %s" % (self.hostname)
             )
+    
+    def save_config(self):
+        """Save the running config to startup config."""
+        self.send_command("copy running-config startup-config")
 
     def close(self):
         """Implement the NAPALM method close (mandatory)"""
