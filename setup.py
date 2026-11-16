@@ -11,7 +11,7 @@ with open("requirements.txt", "r") as fs:
 
 setup(
     name="napalm-arubaos-cli",
-    version="0.1.4",
+    version="0.1.5",
     packages=find_packages(),
     author="David Barroso",
     author_email="dbarrosop@dravetech.com",
@@ -26,5 +26,7 @@ setup(
     ],
     url="https://github.com/napalm-automation/napalm-arubaos-cli",
     include_package_data=True,
+    # tftpy 0.8.5 imports importlib.metadata (Python 3.8+).
+    python_requires=">=3.8",
     install_requires=reqs,
 )
