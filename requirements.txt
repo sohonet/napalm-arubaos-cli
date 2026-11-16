@@ -1,2 +1,4 @@
 napalm>=2.0.0
-tftpy<=0.8.4
+# 0.8.5 drops the pkg_resources import (needs setuptools, absent on Python 3.12+);
+# 0.8.6 adds file locking, which errors on the in-memory candidate (StringIO).
+tftpy>=0.8.5,<0.8.6
