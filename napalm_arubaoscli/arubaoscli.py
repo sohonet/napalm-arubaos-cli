@@ -22,7 +22,7 @@ Read https://napalm.readthedocs.io for more information.
 import tempfile
 import ipaddress
 import difflib
-from threading import Thread
+from threading import Thread, Event
 import socket
 import time
 import io
@@ -46,8 +46,58 @@ logger = logging.getLogger(__name__)
 logging.getLogger("tftpy.TftpServer").setLevel(logging.ERROR)
 
 
+class _CandidateFile:
+    """Candidate config served over TFTP, flagging when it has been read out.
+
+    tftpy pulls the file in fixed-size blocks, so a read shorter than the
+    requested block size means the final block has been handed over and the
+    switch now has the whole candidate. That is a real completion signal to
+    wait on instead of guessing with a fixed sleep.
+
+    This wraps a genuine file object rather than subclassing StringIO because
+    tftpy >= 0.8.5 advisory-locks whatever dyn_file_func returns, which needs
+    both a .name and a real file descriptor. Everything except read/close is
+    delegated so that locking keeps working. (Note tftpy's own TftpServer
+    flock=False argument is accepted but never forwarded to the session
+    context, so it cannot be used to opt out.)
+    """
+
+    def __init__(self, fileobj, done_event):
+        self._fileobj = fileobj
+        self._done_event = done_event
+
+    def read(self, size=-1):
+        chunk = self._fileobj.read(size)
+        if size is None or size < 0 or len(chunk) < size:
+            self._done_event.set()
+        return chunk
+
+    def close(self):
+        # tftpy closes the handle once the transfer finishes; belt and braces
+        # for a candidate whose length is an exact multiple of the block size.
+        self._done_event.set()
+        self._fileobj.close()
+
+    def __getattr__(self, item):
+        # Only reached for attributes we don't define, so .name / .fileno() /
+        # .seek() land on the real file and tftpy's locking is satisfied.
+        return getattr(self._fileobj, item)
+
+
 class ArubaOSCLIDriver(NetworkDriver):
     """Napalm driver for ArubaOSCLI."""
+
+    # Substrings in the switch's copy output that mean the merge did not fully
+    # apply. Kept to phrases that are unambiguously failures — a false positive
+    # here fails a push that actually worked, so prefer adding observed
+    # messages over broad matches like "Error".
+    MERGE_ERROR_PATTERNS = (
+        "were NOT applied",
+        "Configuration file transfer failed",
+        "TFTP transfer failed",
+        "No such file or directory",
+        "Timed out",
+    )
 
     def __init__(self, hostname, username, password, timeout=60, optional_args=None):
         """Constructor."""
@@ -71,6 +121,23 @@ class ArubaOSCLIDriver(NetworkDriver):
 
         self.merge_candidate = False
         self.replace_candidate = False
+
+        # How long to wait for the switch to pull the candidate off us, and how
+        # long to keep reading trailing console output after it has.
+        self.tftp_transfer_timeout = optional_args.pop("tftp_transfer_timeout", 120)
+        self.tftp_settle_time = optional_args.pop("tftp_settle_time", 2)
+
+        # One TFTP server per session, started lazily on the first transfer.
+        # TFTP's initial request is fixed at port 69, so only one server can
+        # exist per host; standing one up per feature push made consecutive
+        # features race each other for the port.
+        self._tftp_server = None
+        self._tftp_thread = None
+        self._tftp_root = None
+        self._candidate_dir = None
+        self._candidate_path = None
+        self._candidate_name = "candidate"
+        self._transfer_done = Event()
 
     def open(self):
         """Implement the NAPALM method open (mandatory)"""
@@ -103,7 +170,13 @@ class ArubaOSCLIDriver(NetworkDriver):
 
     def close(self):
         """Implement the NAPALM method close (mandatory)"""
-        self.device.disconnect()
+        # Tear the TFTP server down first and unconditionally: if the SSH
+        # disconnect raises, the socket must still be released or the next
+        # device in the run cannot bind port 69.
+        try:
+            self._stop_tftp_server()
+        finally:
+            self.device.disconnect()
 
     def send_command(self, command_list, expect_string=r"#"):
         """Convenience function for self.device.send_command
@@ -153,6 +226,9 @@ class ArubaOSCLIDriver(NetworkDriver):
     def discard_config(self):
         self.merge_candidate = False
         self.replace_candidate = False
+        # Stop serving the staged candidate so a stray TFTP request can't pick
+        # up config that was explicitly discarded (e.g. after a dry run).
+        self._candidate_path = None
 
     def load_merge_candidate(self, filename=None, config=None):
         if filename and config:
@@ -192,51 +268,131 @@ class ArubaOSCLIDriver(NetworkDriver):
         elif self.replace_candidate:
             result = self._transfer_file(self.replace_candidate)
 
-        if "Some of the configuration lines from the file were NOT applied" in result:
-            raise MergeConfigException(
-                "Some of the configuration lines from the file were NOT applied."
-            )
-
-    def _transfer_file(self, filecontent, destfile="candidate"):
-        # Transfer merge candidate with tftp
-        with tempfile.TemporaryDirectory() as temp_dir:
-            # Setup TFTP server
-            tftp_server = tftpy.TftpServer(
-                tftproot=temp_dir,
-                dyn_file_func=self._tftp_handler(filecontent),
-            )
-            tftp_thread = Thread(target=tftp_server.listen)
-            tftp_thread.daemon = True
-            tftp_thread.start()
-
-            try:
-                result = self.send_command(
-                    [f"copy tftp://{self._get_ipaddress()}/{destfile} running-config vrf {self.mgmt_vrf}"]
+        for pattern in self.MERGE_ERROR_PATTERNS:
+            if pattern in result:
+                logger.error("Merge failed on %s: %r", self.hostname, result)
+                raise MergeConfigException(
+                    "Failed applying config on %s (matched %r):\n%s"
+                    % (self.hostname, pattern, result)
                 )
 
-                # Server downloads in the background. Sleep to wait for it
-                time.sleep(5)
-            finally:
-                tftp_server.stop(now=True)
-                # tftpy's select() loop has a 5s SOCK_TIMEOUT before it
-                # checks the shutdown flag, so allow up to 10s for cleanup.
-                tftp_thread.join(timeout=10)
-                # If the thread still hasn't released the socket, force
-                # close it so the next feature can bind to port 69.
-                if tftp_thread.is_alive():
+    def _transfer_file(self, filecontent, destfile="candidate"):
+        """Serve filecontent over TFTP and have the switch merge it.
+
+        The server is reused for the whole session, so successive feature
+        pushes no longer contend for port 69 or pay a teardown cost each time.
+        """
+        self._ensure_tftp_server()
+        self._candidate_name = destfile
+        self._transfer_done.clear()
+
+        # Stage the candidate as a real file, deliberately NOT inside the
+        # served root: tftpy opens root/<name> directly when it exists, which
+        # would bypass our handler and lose the completion signal.
+        self._candidate_path = os.path.join(self._candidate_dir.name, destfile)
+        with open(self._candidate_path, "w") as fobj:
+            fobj.write(filecontent)
+
+        logger.info("Sending %d bytes of candidate config to %s",
+                    len(filecontent), self.hostname)
+
+        result = self.send_command(
+            [f"copy tftp://{self._get_ipaddress()}/{destfile} running-config vrf {self.mgmt_vrf}"]
+        )
+
+        # Wait for the switch to actually pull the whole candidate rather than
+        # sleeping a fixed interval and hoping. A blind sleep silently
+        # truncated larger candidates: the server was torn down mid-transfer
+        # and the switch was left with a partially applied config.
+        if not self._transfer_done.wait(self.tftp_transfer_timeout):
+            raise MergeConfigException(
+                "TFTP transfer to %s did not complete within %ss - the running "
+                "config may be partially applied"
+                % (self.hostname, self.tftp_transfer_timeout)
+            )
+
+        # The copy is applied asynchronously, so the switch can print its
+        # failure message after the prompt has already come back. Reading the
+        # channel for a moment means commit_config actually sees it instead of
+        # reporting success on a partial merge.
+        result += self._drain_channel(self.tftp_settle_time)
+
+        return result
+
+    def _ensure_tftp_server(self):
+        """Start the session's TFTP server if it isn't already running."""
+        if self._tftp_server is not None:
+            return
+
+        # Served root stays empty; candidates are staged in a separate dir so
+        # requests always route through dyn_file_func. See _transfer_file.
+        self._tftp_root = tempfile.TemporaryDirectory()
+        self._candidate_dir = tempfile.TemporaryDirectory()
+
+        self._tftp_server = tftpy.TftpServer(
+            tftproot=self._tftp_root.name,
+            dyn_file_func=self._tftp_handler,
+        )
+        self._tftp_thread = Thread(target=self._tftp_server.listen)
+        self._tftp_thread.daemon = True
+        self._tftp_thread.start()
+        logger.info("TFTP server started for %s session", self.hostname)
+
+    def _stop_tftp_server(self):
+        """Stop the session's TFTP server and release port 69."""
+        if self._tftp_server is None:
+            return
+
+        try:
+            self._tftp_server.stop(now=True)
+            # tftpy's select() loop has a 5s SOCK_TIMEOUT before it checks the
+            # shutdown flag, so allow up to 10s for cleanup.
+            self._tftp_thread.join(timeout=10)
+            # If the thread still hasn't released the socket, force close it so
+            # the next device in the run can bind to port 69.
+            if self._tftp_thread.is_alive():
+                logger.warning("TFTP thread for %s did not exit; closing socket",
+                               self.hostname)
+                try:
+                    self._tftp_server.sock.close()
+                except Exception:
+                    pass
+        finally:
+            for tmpdir in (self._tftp_root, self._candidate_dir):
+                if tmpdir is not None:
                     try:
-                        tftp_server.sock.close()
+                        tmpdir.cleanup()
                     except Exception:
                         pass
+            self._tftp_server = None
+            self._tftp_thread = None
+            self._tftp_root = None
+            self._candidate_dir = None
+            self._candidate_path = None
 
-            return result
+    def _drain_channel(self, seconds):
+        """Collect output the switch printed after the prompt came back."""
+        extra = ""
+        deadline = time.time() + seconds
+        while time.time() < deadline:
+            try:
+                chunk = self.device.read_channel()
+            except Exception:
+                break
+            if chunk:
+                extra += chunk
+                # Keep listening while output is still arriving.
+                deadline = time.time() + seconds
+            else:
+                time.sleep(0.2)
+        return extra
 
-    def _tftp_handler(self, candidate):
-        """tftp handler. return candidate no matter what is requested."""
-        def _handler(fn, raddress=None, rport=None):
-            if fn == "candidate":
-                return io.StringIO(candidate)
-        return _handler
+    def _tftp_handler(self, fn, raddress=None, rport=None):
+        """tftpy dyn_file_func: serve the staged candidate config."""
+        if fn != self._candidate_name or not self._candidate_path:
+            logger.warning("TFTP request for unexpected file %r from %s", fn, raddress)
+            return None
+        return _CandidateFile(open(self._candidate_path, "rb"), self._transfer_done)
 
     def _get_ipaddress(self):
         # Use TFTP_SERVER_IP env var if set, otherwise auto-detect
